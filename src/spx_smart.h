@@ -51,6 +51,10 @@ extern "C" {
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifndef bool_t
+typedef enum { false = 0, true = 1 } bool_t;
+#endif
+
 #define SpxAtomic volatile
 #ifdef SpxDEBUG
 #define ASSERT( s ) assert( s )
@@ -96,6 +100,11 @@ extern "C" {
 #define SpxSmart __attribute__( ( cleanup( spx_smart_cleanup ) ) )
 
 /*
+ * the calback destructor for member in the smart pointer
+ */
+typedef void( SpxSmartDestructorDelegate )( void **p );
+
+/*
  * smart pointer style
  * normal : not the smart pointer,
  *          pointer but use the smart metadata for hiddle header
@@ -110,9 +119,16 @@ extern "C" {
 enum spx_smart_kind { normal, scoped, shared };
 
 /*
- * the calback destructor for member in the smart pointer
- * /
-typedef void( SpxSmartDestructorDelegate )( void *p );
+ * the metadata for smart pointer
+ * it's also as the hiddle head for smart pointer
+ */
+struct spx_smart_metadata {
+    int kind;                 // smart pointer style
+    SpxAtomic int ref_count;  // ref count for shared pointer
+    int bsize;     // body size,excpet the hiddle head struct spx_smart_metadata
+    int freesize;  // memory freesize
+    SpxSmartDestructorDelegate *dtor;  // destructor callback
+};
 
 /*
  * funtion wrap for alloc smart pointer
@@ -155,6 +171,45 @@ SpxInline void spx_smart_cleanup( void *p );
  *  p : the smart pointer
  */
 void spx_smart_unref( void *p );
+
+/*
+ * free the smart pointer force
+ */
+SpxInline void spx_smart_ptr_free( void *p );
+
+/*
+ * get the smart pointer metadata
+ * paras:
+ *  p : the smart pointer
+ * result:
+ *  smart pointer metadata,the same as hiddle head
+ * */
+SpxInline struct spx_smart_metadata *spx_smart_get_metadata( const void *p );
+
+/*
+ * realloc the smart pointer
+ * it usually for expand the memory size
+ * paras:
+ *  p : the smart pointer
+ *  size : the memory size for expanding
+ *  is_mulit_ref_error : set err when shared pointer has mulit referenced
+ *  err : errno
+ * result:
+ *  NULL : if shared pointer has mulit referenced and is_mulit_ref_error == true
+ *  pointer : the smart pointer as expanded
+ */
+void *spx_smart_ptr_resize( void *p,
+                            const int size,
+                            const bool_t is_mulit_ref_error,
+                            int *err );
+
+/*
+ * update the freesize for smart pointer
+ * paras:
+ *  p : the smart pointer
+ *  usize : the used memory size
+ */
+SpxInline void spx_smart_update_freesize( const void *p, const int usize );
 
 /*
  * new a scoped pointer

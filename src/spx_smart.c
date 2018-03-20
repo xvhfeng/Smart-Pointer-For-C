@@ -33,22 +33,11 @@
  *
  ***********************************************************************/
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "spx_smart.h"
-
-/*
- * the metadata for smart pointer
- * it's also as the hiddle head for smart pointer
- */
-struct spx_smart_metadata {
-    int kind;
-    SpxAtomic int ref_count;
-    int msize;  // memory size
-    int freesize;
-    SpxSmartDestructorDelegate *dtor;
-};
 
 /*
  * structor for smart pointer
@@ -62,11 +51,11 @@ struct spx_smart_ptr {
  * print the metadata of smart pointer
  */
 void spx_smart_print( const char *func, void *p ) { /*{{{*/
-    int hlen = sizeof( struct spx_smart_metadata );
-    struct spx_smart_metadata *md
-        = (struct spx_smart_metadata *) SpxLeftAlign( p, hlen );
-    printf( "func:%s,smart ptr:%lld,metadata:kind=%d,msize=%d,ref_count=%d.\n",
-            func, p, md->kind, md->msize, md->ref_count );
+#ifdef SpxDEBUG
+    struct spx_smart_metadata *md = spx_smart_get_metadata( p );
+    printf( "func:%s,smart ptr:%p,metadata:kind=%d,bsize=%d,ref_count=%d.\n",
+            func, p, md->kind, md->bsize, md->ref_count );
+#endif
 } /*}}}*/
 
 void *spx_smart_ptr_wrap( const enum spx_smart_kind kind,
@@ -77,27 +66,23 @@ void *spx_smart_ptr_wrap( const enum spx_smart_kind kind,
     int blen = SpxAlign( size );
     struct spx_smart_ptr *p
         = (struct spx_smart_ptr *) calloc( sizeof( char ), hlen + blen );
-    if ( NULL == p ) {
-        ASSERT( p );
-    }
+    ASSERT( p );
     struct spx_smart_metadata *md = (struct spx_smart_metadata *) p;
     md->kind = kind;
     md->dtor = dtor;
-    md->msize = hlen + blen;
+    md->bsize = blen;
+    md->freesize = blen - size;
     md->ref_count = 1;
     return p->p;
 } /*}}}*/
 
 void *spx_smart_ref( void *p ) { /*{{{*/
-    int hlen = sizeof( struct spx_smart_metadata );
-    struct spx_smart_metadata *md
-        = (struct spx_smart_metadata *) SpxLeftAlign( p, hlen );
+    struct spx_smart_metadata *md = spx_smart_get_metadata( p );
     if ( normal == md->kind || scoped == md->kind ) {
-        ASSERT( scoped == md->kind );
+        ASSERT( shared == md->kind );
     }
     if ( shared == md->kind ) {
         md->ref_count++;
-        printf( "ref ptr=%lld,current ref_count=%d\n", p, md->ref_count );
     }
     spx_smart_print( __FUNCTION__, p );
     return p;
@@ -105,39 +90,29 @@ void *spx_smart_ref( void *p ) { /*{{{*/
 
 SpxInline void spx_smart_cleanup( void *p ) { /*{{{*/
     void *ptr = *(void **) p;
-    if ( NULL == p )
+    if ( NULL == p || NULL == ptr )
         return;
-    union {
-        void **rptr;
-        void *ptr;
-    } c;
-    c.ptr = ptr;
-    int hlen = sizeof( struct spx_smart_metadata );
-    struct spx_smart_metadata *md
-        = (struct spx_smart_metadata *) SpxLeftAlign( ptr, hlen );
+    struct spx_smart_metadata *md = spx_smart_get_metadata( ptr );
     spx_smart_print( __FUNCTION__, ptr );
     switch ( md->kind ) {
         case ( normal ):
         case ( scoped ): {
             if ( NULL != md->dtor ) {
-                md->dtor( ptr );
+                md->dtor( &ptr );
+            } else {
+                free( md );
+                *(void **) p = NULL;
             }
-            struct spx_smart_ptr *smart = (struct spx_smart_ptr *) md;
-            free( smart );
-            *(void **) p = NULL;
             break;
         }
         case ( shared ): {
             if ( 1 == ( md->ref_count-- ) ) {
-                printf( "shared over = %lld\n", ptr );
                 if ( NULL != md->dtor ) {
-                    md->dtor( ptr );
+                    md->dtor( &ptr );
+                } else {
+                    free( md );
+                    *(void **) p = NULL;
                 }
-                free( md );
-                *(void **) p = NULL;
-            } else {
-                printf( "shared ptr:%lld,unref count:%d.\n", ptr,
-                        md->ref_count );
             }
             break;
         }
@@ -145,76 +120,90 @@ SpxInline void spx_smart_cleanup( void *p ) { /*{{{*/
 } /*}}}*/
 
 void spx_smart_unref( void *p ) { /*{{{*/
-    int hlen = sizeof( struct spx_smart_metadata );
-    struct spx_smart_metadata *md
-        = (struct spx_smart_metadata *) SpxLeftAlign( p, hlen );
+    struct spx_smart_metadata *md = spx_smart_get_metadata( p );
     spx_smart_print( __FUNCTION__, p );
     switch ( md->kind ) {
         case ( normal ):
         case ( scoped ): {
             if ( NULL != md->dtor ) {
-                md->dtor( p );
+                md->dtor( &p );
+            } else {
+                free( md );
+                *(void **) p = NULL;
             }
-            struct spx_smart_ptr *smart = (struct spx_smart_ptr *) md;
-            free( smart );
-            *(void **) p = NULL;
             break;
         }
         case ( shared ): {
             if ( 0 == ( --md->ref_count ) ) {
-                printf( "destory shared ptr:%lld,unref count:%d.\n", p,
-                        md->ref_count );
                 if ( NULL != md->dtor ) {
-                    md->dtor( p );
+                    md->dtor( &p );
+                } else {
+                    free( md );
+                    *(void **) p = NULL;
                 }
-                free( md );
-                *(void **) p = NULL;
-            } else {
-                printf( "shared ptr:%lld,unref count:%d.\n", p, md->ref_count );
             }
             break;
         }
     }
 } /*}}}*/
 
-struct spx_people_test {
-    int age;
-    int *count;
-};
-
-void spx_smart_people_cleanup( void *p ) { /*{{{*/
-    struct spx_people_test *t = (struct spx_people_test *) p;
-    if ( NULL != t->count ) {
-        spx_smart_print( __FUNCTION__, t->count );
-        spx_smart_unref( t->count );
-    }
+SpxInline void spx_smart_ptr_free( void *p ) { /*{{{*/
+    union {
+        void **rptr;
+        void *ptr;
+    } c = { .ptr = p };
+    struct spx_smart_metadata *md = spx_smart_get_metadata( p );
+    free( md );
+    md = NULL;
+    *( c.rptr ) = NULL;
 } /*}}}*/
 
-int main( int argc, char **argv ) {
-    int err = 0;
-    do {
-        SpxSmart struct spx_people_test *spt
-            = spx_shared_ptr( sizeof( *spt ), spx_smart_people_cleanup, &err );
+SpxInline struct spx_smart_metadata *spx_smart_get_metadata(
+    const void *p ) { /*{{{*/
+    int hlen = sizeof( struct spx_smart_metadata );
+    struct spx_smart_metadata *md
+        = (struct spx_smart_metadata *) SpxLeftAlign( p, hlen );
+    return md;
+} /*}}}*/
 
-        ASSERT( spt );
-        spx_smart_print( __FUNCTION__, spt );
+void *spx_smart_ptr_resize( void *p,
+                            const int size,
+                            const bool_t is_mulit_ref_error,
+                            int *err ) { /*{{{*/
+    struct spx_smart_metadata *md = spx_smart_get_metadata( p );
+    if ( size <= md->bsize ) {
+        return p;
+    }
+    int usize = md->bsize - md->freesize;
+    int blen = SpxAlign( size );
+    int hlen = sizeof( struct spx_smart_metadata );
+    if ( scoped == md->kind || normal == md->kind ) {
+        struct spx_smart_ptr *ptr
+            = realloc( (struct spx_smart_ptr *) md, hlen + blen );
+        ASSERT( ptr );
+        struct spx_smart_metadata *md_new = (struct spx_smart_metadata *) ptr;
+        md_new->bsize = blen;
+        md_new->freesize = blen - usize;
+        return ptr->p;
+    }
+    if ( shared == md->kind ) {
+        if ( ( 1 == md->ref_count ) && is_mulit_ref_error ) {
+            *err = EPERM;
+            return NULL;
+        }
+        struct spx_smart_ptr *ptr
+            = realloc( (struct spx_smart_ptr *) md, hlen + blen );
+        ASSERT( ptr );
+        struct spx_smart_metadata *md_new = (struct spx_smart_metadata *) ptr;
+        md_new->bsize = blen;
+        md_new->freesize = blen - usize;
+        return ptr->p;
+    }
+    return NULL;
+} /*}}}*/
 
-        SpxSmart int *t = spx_shared_ptr( sizeof( int ), NULL, &err );
-        ASSERT( spt );
-        spx_smart_print( __FUNCTION__, t );
-        spt->age = 2;
-        spt->count = spx_smart_ref( t );
-
-        goto r1;
-        SpxSmart struct spx_people_test *spt2
-            = spx_shared_ptr( sizeof( *spt2 ), spx_smart_people_cleanup, &err );
-
-        ASSERT( spt2 );
-        spx_smart_print( __FUNCTION__, spt2 );
-
-    } while ( 0 );
-    printf( "pause\n" );
-r1:
-    printf( "over \n" );
-    return 0;
-}
+SpxInline void spx_smart_update_freesize( const void *p,
+                                          const int usize ) { /*{{{*/
+    struct spx_smart_metadata *md = spx_smart_get_metadata( p );
+    md->freesize = md->bsize - usize;
+} /*}}}*/
